@@ -259,3 +259,68 @@
     )
   )
 )
+
+;; Begin unstaking process with mandatory cooling-off period
+(define-public (initiate-unstake (amount uint))
+  (let (
+      (staking-position (unwrap! (map-get? StakingPositions tx-sender) ERR-NO-STAKE))
+      (current-amount (get amount staking-position))
+    )
+    ;; Validate unstaking request
+    (asserts! (>= current-amount amount) ERR-INSUFFICIENT-STX)
+    (asserts! (is-none (get cooldown-start staking-position)) ERR-COOLDOWN-ACTIVE)
+    ;; Activate cooldown period for security
+    (map-set StakingPositions tx-sender
+      (merge staking-position { cooldown-start: (some stacks-block-height) })
+    )
+    (ok true)
+  )
+)
+
+;; Complete unstaking after cooldown period expires
+(define-public (complete-unstake)
+  (let (
+      (staking-position (unwrap! (map-get? StakingPositions tx-sender) ERR-NO-STAKE))
+      (cooldown-start (unwrap! (get cooldown-start staking-position) ERR-NOT-AUTHORIZED))
+    )
+    ;; Verify cooldown period has elapsed
+    (asserts!
+      (>= (- stacks-block-height cooldown-start) (var-get cooldown-period))
+      ERR-COOLDOWN-ACTIVE
+    )
+    ;; Return STX to user wallet
+    (try! (as-contract (stx-transfer? (get amount staking-position) tx-sender tx-sender)))
+    ;; Clean up staking position
+    (map-delete StakingPositions tx-sender)
+    (ok true)
+  )
+)
+
+;; Create governance proposal for protocol parameter changes
+(define-public (create-proposal
+    (description (string-utf8 256))
+    (voting-period uint)
+  )
+  (let (
+      (user-position (unwrap! (map-get? UserPositions tx-sender) ERR-NOT-AUTHORIZED))
+      (proposal-id (+ (var-get proposal-count) u1))
+    )
+    ;; Validate proposal creator has sufficient voting power
+    (asserts! (>= (get voting-power user-position) u1000000) ERR-NOT-AUTHORIZED)
+    (asserts! (is-valid-description description) ERR-INVALID-PROTOCOL)
+    (asserts! (is-valid-voting-period voting-period) ERR-INVALID-PROTOCOL)
+    ;; Register new governance proposal
+    (map-set Proposals { proposal-id: proposal-id } {
+      creator: tx-sender,
+      description: description,
+      start-block: stacks-block-height,
+      end-block: (+ stacks-block-height voting-period),
+      executed: false,
+      votes-for: u0,
+      votes-against: u0,
+      minimum-votes: u1000000,
+    })
+    (var-set proposal-count proposal-id)
+    (ok proposal-id)
+  )
+)
