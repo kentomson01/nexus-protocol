@@ -169,3 +169,93 @@
     (is-eq lock-period u8640) ;; 2-month lock
   )
 )
+
+;; Validates voting period duration for governance proposals
+(define-private (is-valid-voting-period (period uint))
+  (and
+    (>= period u100) ;; Minimum 100 blocks
+    (<= period u2880) ;; Maximum 2880 blocks (~1 day)
+  )
+)
+
+;; PUBLIC FUNCTIONS
+
+;; Initialize protocol with tier structure and default configurations
+(define-public (initialize-contract)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    ;; Configure Silver Tier (Entry Level)
+    (map-set TierLevels u1 {
+      minimum-stake: u1000000, ;; 1M uSTX minimum
+      reward-multiplier: u100, ;; 1x base rewards
+      features-enabled: (list true false false false false false false false false false),
+    })
+    ;; Configure Gold Tier (Intermediate)
+    (map-set TierLevels u2 {
+      minimum-stake: u5000000, ;; 5M uSTX minimum
+      reward-multiplier: u150, ;; 1.5x enhanced rewards
+      features-enabled: (list true true true false false false false false false false),
+    })
+    ;; Configure Diamond Tier (Premium)
+    (map-set TierLevels u3 {
+      minimum-stake: u10000000, ;; 10M uSTX minimum
+      reward-multiplier: u200, ;; 2x premium rewards
+      features-enabled: (list true true true true true false false false false false),
+    })
+    (ok true)
+  )
+)
+
+;; Stake STX tokens with optional time-lock for enhanced rewards
+(define-public (stake-stx
+    (amount uint)
+    (lock-period uint)
+  )
+  (let ((current-position (default-to {
+      total-collateral: u0,
+      total-debt: u0,
+      health-factor: u0,
+      last-updated: u0,
+      stx-staked: u0,
+      analytics-tokens: u0,
+      voting-power: u0,
+      tier-level: u0,
+      rewards-multiplier: u100,
+    }
+      (map-get? UserPositions tx-sender)
+    )))
+    ;; Pre-flight validation checks
+    (asserts! (is-valid-lock-period lock-period) ERR-INVALID-PROTOCOL)
+    (asserts! (not (var-get contract-paused)) ERR-PAUSED)
+    (asserts! (>= amount (var-get minimum-stake)) ERR-BELOW-MINIMUM)
+    ;; Transfer STX to protocol custody
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    ;; Calculate tier benefits and time-lock bonuses
+    (let (
+        (new-total-stake (+ (get stx-staked current-position) amount))
+        (tier-info (get-tier-info new-total-stake))
+        (lock-multiplier (calculate-lock-multiplier lock-period))
+      )
+      ;; Record staking position details
+      (map-set StakingPositions tx-sender {
+        amount: amount,
+        start-block: stacks-block-height,
+        last-claim: stacks-block-height,
+        lock-period: lock-period,
+        cooldown-start: none,
+        accumulated-rewards: u0,
+      })
+      ;; Update user position with tier progression
+      (map-set UserPositions tx-sender
+        (merge current-position {
+          stx-staked: new-total-stake,
+          tier-level: (get tier-level tier-info),
+          rewards-multiplier: (* (get reward-multiplier tier-info) lock-multiplier),
+        })
+      )
+      ;; Update global STX pool metrics
+      (var-set stx-pool (+ (var-get stx-pool) amount))
+      (ok true)
+    )
+  )
+)
